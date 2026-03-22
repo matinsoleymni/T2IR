@@ -61,6 +61,10 @@ GDRIVE_CLIENT_SECRET_FILE = os.getenv("GDRIVE_CLIENT_SECRET_FILE", "client_secre
 GDRIVE_TOKEN_FILE = os.getenv("GDRIVE_TOKEN_FILE", "token.json")
 GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID") or None
 LOCAL_API_URL = os.getenv("LOCAL_API_URL") or None  # e.g. http://localhost:8081/bot
+# Path on the HOST where the local API server stores files.
+# The Docker container uses /var/lib/telegram-bot-api internally; this maps it to the host path.
+LOCAL_API_DATA_DIR = os.getenv("LOCAL_API_DATA_DIR") or None  # e.g. /root/T2IR/telegram-bot-api-data
+_CONTAINER_DATA_PREFIX = "/var/lib/telegram-bot-api"
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
@@ -175,12 +179,20 @@ async def _process_file(
                 # PTB may return the raw absolute path ("/var/lib/...") OR a broken
                 # URL like "https://api.telegram.org/file/bot<TOKEN>//var/lib/..."
                 # (it appends the absolute path to the base URL, creating a double-slash).
-                # Either way, extract the real local path and copy directly.
+                # Either way, extract the container-internal absolute path first.
                 if file_path.startswith("/"):
                     real_local_path = file_path
                 else:
-                    # Split on "//" and take the last segment, then restore leading "/"
+                    # URL with embedded absolute path after the double-slash
                     real_local_path = "/" + file_path.split("//")[-1]
+
+                # Remap container path → host path when running via Docker
+                if (
+                    LOCAL_API_DATA_DIR
+                    and real_local_path.startswith(_CONTAINER_DATA_PREFIX)
+                ):
+                    real_local_path = LOCAL_API_DATA_DIR + real_local_path[len(_CONTAINER_DATA_PREFIX):]
+
                 await asyncio.to_thread(shutil.copy2, real_local_path, local_path)
                 progress.update(task, completed=file_size)
             else:
