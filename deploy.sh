@@ -150,8 +150,9 @@ else
             -p 8081:8081 \
             -v "$LOCAL_DATA:/var/lib/telegram-bot-api" \
             aiogram/telegram-bot-api:latest \
-            --api-id="$TG_API_ID" \
-            --api-hash="$TG_API_HASH" \
+            -e TELEGRAM_API_ID="$TG_API_ID" \
+            -e TELEGRAM_API_HASH="$TG_API_HASH" \
+            -e TELEGRAM_LOCAL=1 \
             --local \
             --dir=/var/lib/telegram-bot-api
 

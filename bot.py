@@ -170,9 +170,18 @@ async def _process_file(
 
             file_path = tg_file.file_path
 
-            if LOCAL_API_URL and not file_path.startswith("http"):
-                # Local API mode: file_path is an absolute path on this machine
-                await asyncio.to_thread(shutil.copy2, file_path, local_path)
+            if LOCAL_API_URL:
+                # Local API mode: the local Telegram server stores files on disk.
+                # PTB may return the raw absolute path ("/var/lib/...") OR a broken
+                # URL like "https://api.telegram.org/file/bot<TOKEN>//var/lib/..."
+                # (it appends the absolute path to the base URL, creating a double-slash).
+                # Either way, extract the real local path and copy directly.
+                if file_path.startswith("/"):
+                    real_local_path = file_path
+                else:
+                    # Split on "//" and take the last segment, then restore leading "/"
+                    real_local_path = "/" + file_path.split("//")[-1]
+                await asyncio.to_thread(shutil.copy2, real_local_path, local_path)
                 progress.update(task, completed=file_size)
             else:
                 downloaded = 0
