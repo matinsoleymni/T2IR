@@ -1,0 +1,6 @@
+python-telegram-bot==21.6
+google-api-python-client==2.147.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+python-dotenv==1.0.1
+rich==13.9.4
