@@ -1,8 +1,11 @@
 import os
+import time
 import logging
 import tempfile
 from pathlib import Path
 from datetime import datetime
+
+import httpx
 
 from rich.console import Console
 from rich.panel import Panel
@@ -70,7 +73,7 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 
-def upload_to_drive(file_path: str, file_name: str, mime_type: str, file_size: int) -> str:
+async def upload_to_drive(file_path: str, file_name: str, mime_type: str, file_size: int, progress_cb=None) -> str:
     service = get_drive_service()
 
     metadata = {"name": file_name}
@@ -92,10 +95,19 @@ def upload_to_drive(file_path: str, file_name: str, mime_type: str, file_size: i
     ) as progress:
         task = progress.add_task("upload", total=file_size)
         response = None
+        last_edit = 0.0
         while response is None:
             status, response = request.next_chunk()
             if status:
-                progress.update(task, completed=int(status.resumable_progress))
+                done = int(status.resumable_progress)
+                progress.update(task, completed=done)
+                now = time.monotonic()
+                if progress_cb and now - last_edit >= 2:
+                    pct = int(done / file_size * 100) if file_size else 0
+                    done_mb = done / 1024 / 1024
+                    total_mb = file_size / 1024 / 1024
+                    await progress_cb(f"☁️ Uploading to Drive... {pct}% ({done_mb:.1f} / {total_mb:.1f} MB)")
+                    last_edit = now
         progress.update(task, completed=file_size)
 
     file_id = response["id"]
@@ -168,12 +180,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         extra={"markup": True},
     )
 
-    status_msg = await update.message.reply_text("⬇️ Downloading...")
+    status_msg = await update.message.reply_text("⬇️ Downloading... 0%")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         local_path = str(Path(tmpdir) / file_name)
 
-        # Download with progress bar in console
+        # Download with progress bar in console and Telegram message
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold yellow]Downloading from Telegram[/]"),
@@ -185,16 +197,35 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             transient=True,
         ) as progress:
             task = progress.add_task("download", total=file_size if file_size else None)
-            await tg_file.download_to_drive(local_path)
-            progress.update(task, completed=file_size)
+            downloaded = 0
+            last_edit = 0.0
+            async with httpx.AsyncClient() as client:
+                async with client.stream("GET", tg_file.file_path) as resp:
+                    with open(local_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(65536):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            progress.update(task, completed=downloaded)
+                            now = time.monotonic()
+                            if now - last_edit >= 2 and file_size:
+                                pct = int(downloaded / file_size * 100)
+                                done_mb = downloaded / 1024 / 1024
+                                total_mb = file_size / 1024 / 1024
+                                await status_msg.edit_text(
+                                    f"⬇️ Downloading... {pct}% ({done_mb:.1f} / {total_mb:.1f} MB)"
+                                )
+                                last_edit = now
 
         actual_size = Path(local_path).stat().st_size
         logger.info("  Downloaded: %s (%.1f KB)", file_name, actual_size / 1024)
 
-        await status_msg.edit_text("☁️ Uploading to Google Drive...")
+        await status_msg.edit_text("☁️ Uploading to Drive... 0%")
+
+        async def upload_progress(text: str):
+            await status_msg.edit_text(text)
 
         try:
-            link = upload_to_drive(local_path, file_name, mime_type, actual_size)
+            link = await upload_to_drive(local_path, file_name, mime_type, actual_size, progress_cb=upload_progress)
             file_id = link.split("/d/")[1].split("/")[0]
             stats["uploaded"] += 1
             keyboard = InlineKeyboardMarkup([[
