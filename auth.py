@@ -6,7 +6,7 @@ After this, token.json is saved and the bot uses it automatically forever
 """
 
 import os
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,8 +22,26 @@ if not os.path.exists(CLIENT_SECRET_FILE):
     print(f"  Save it as: {CLIENT_SECRET_FILE}\n")
     raise SystemExit(1)
 
-flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-creds = flow.run_console()
+flow = Flow.from_client_secrets_file(
+    CLIENT_SECRET_FILE,
+    scopes=SCOPES,
+    redirect_uri="urn:ietf:wg:oauth:2.0:oob",
+)
+
+auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+
+print("\n" + "─" * 60)
+print("  Open this URL in your browser:")
+print("─" * 60)
+print(f"\n{auth_url}\n")
+print("─" * 60)
+print("  Log in with your Google account, allow access,")
+print("  then copy the code shown and paste it below.")
+print("─" * 60 + "\n")
+
+code = input("Paste authorization code here: ").strip()
+flow.fetch_token(code=code)
+creds = flow.credentials
 
 with open(TOKEN_FILE, "w") as f:
     f.write(creds.to_json())
