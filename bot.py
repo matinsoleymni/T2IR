@@ -1,27 +1,39 @@
-import os
-import time
 import logging
+import os
 import tempfile
-from pathlib import Path
+import time
 from datetime import datetime
+from pathlib import Path
 
 import httpx
-
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn
-from rich.logging import RichHandler
-from rich.table import Table
-from rich import box
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from dotenv import load_dotenv
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from dotenv import load_dotenv
+from rich import box
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
+from rich.table import Table
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 load_dotenv()
 
@@ -40,7 +52,9 @@ logging.getLogger("googleapiclient").setLevel(logging.WARNING)
 logger = logging.getLogger("bot")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ALLOWED_IDS = set(int(x.strip()) for x in os.getenv("ALLOWED_IDS", "").split(",") if x.strip())
+ALLOWED_IDS = set(
+    int(x.strip()) for x in os.getenv("ALLOWED_IDS", "").split(",") if x.strip()
+)
 GDRIVE_CLIENT_SECRET_FILE = os.getenv("GDRIVE_CLIENT_SECRET_FILE", "client_secret.json")
 GDRIVE_TOKEN_FILE = os.getenv("GDRIVE_TOKEN_FILE", "token.json")
 GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID") or None
@@ -63,9 +77,7 @@ def get_drive_service():
             creds.refresh(Request())
             logger.info("OAuth2 token refreshed")
         else:
-            raise RuntimeError(
-                "Not authenticated. Run:  python auth.py"
-            )
+            raise RuntimeError("Not authenticated. Run:  python auth.py")
 
         with open(GDRIVE_TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
@@ -73,14 +85,18 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 
-async def upload_to_drive(file_path: str, file_name: str, mime_type: str, file_size: int, progress_cb=None) -> str:
+async def upload_to_drive(
+    file_path: str, file_name: str, mime_type: str, file_size: int, progress_cb=None
+) -> str:
     service = get_drive_service()
 
     metadata = {"name": file_name}
     if GDRIVE_FOLDER_ID:
         metadata["parents"] = [GDRIVE_FOLDER_ID]
 
-    media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True, chunksize=1024 * 1024)
+    media = MediaFileUpload(
+        file_path, mimetype=mime_type, resumable=True, chunksize=1024 * 1024
+    )
     request = service.files().create(body=metadata, media_body=media, fields="id")
 
     with Progress(
@@ -106,7 +122,9 @@ async def upload_to_drive(file_path: str, file_name: str, mime_type: str, file_s
                     pct = int(done / file_size * 100) if file_size else 0
                     done_mb = done / 1024 / 1024
                     total_mb = file_size / 1024 / 1024
-                    await progress_cb(f"☁️ Uploading to Drive... {pct}% ({done_mb:.1f} / {total_mb:.1f} MB)")
+                    await progress_cb(
+                        f"☁️ Uploading to Drive... {pct}% ({done_mb:.1f} / {total_mb:.1f} MB)"
+                    )
                     last_edit = now
         progress.update(task, completed=file_size)
 
@@ -126,7 +144,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in ALLOWED_IDS:
         stats["denied"] += 1
-        logger.warning("[red]DENIED[/] user [bold]%s[/] (id=%s)", username, user_id, extra={"markup": True})
+        logger.warning(
+            "[red]DENIED[/] user [bold]%s[/] (id=%s)",
+            username,
+            user_id,
+            extra={"markup": True},
+        )
         await update.message.reply_text("Access denied.")
         return
 
@@ -176,7 +199,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     size_kb = file_size / 1024
     logger.info(
         "[green]FILE[/] from [bold]%s[/] — %s (%.1f KB)",
-        username, file_name, size_kb,
+        username,
+        file_name,
+        size_kb,
         extra={"markup": True},
     )
 
@@ -225,22 +250,37 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text(text)
 
         try:
-            link = await upload_to_drive(local_path, file_name, mime_type, actual_size, progress_cb=upload_progress)
+            link = await upload_to_drive(
+                local_path,
+                file_name,
+                mime_type,
+                actual_size,
+                progress_cb=upload_progress,
+            )
             file_id = link.split("/d/")[1].split("/")[0]
             stats["uploaded"] += 1
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🗑 Delete from Drive", callback_data=f"delete:{file_id}")
-            ]])
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🗑 Delete from Drive", callback_data=f"delete:{file_id}"
+                        )
+                    ]
+                ]
+            )
             await status_msg.edit_text(f"✅ Done!\n\n🔗 {link}", reply_markup=keyboard)
             logger.info(
                 "[bold green]✓ UPLOADED[/] %s → %s",
-                file_name, link,
+                file_name,
+                link,
                 extra={"markup": True},
             )
             _print_stats()
         except Exception as e:
             stats["errors"] += 1
-            logger.error("[red]✗ UPLOAD FAILED[/] %s: %s", file_name, e, extra={"markup": True})
+            logger.error(
+                "[red]✗ UPLOAD FAILED[/] %s: %s", file_name, e, extra={"markup": True}
+            )
             await status_msg.edit_text(f"❌ Upload failed: {e}")
 
 
@@ -281,16 +321,18 @@ def main():
         raise ValueError("ALLOWED_IDS is not set in .env")
 
     file_limit = "2 GB (local API)" if LOCAL_API_URL else "20 MB (official API)"
-    console.print(Panel.fit(
-        f"[bold cyan]Telegram → Google Drive Bot[/]\n\n"
-        f"  [dim]Started:[/]      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"  [dim]Allowed IDs:[/]  {', '.join(str(i) for i in ALLOWED_IDS)}\n"
-        f"  [dim]Auth token:[/]   {GDRIVE_TOKEN_FILE}\n"
-        f"  [dim]Drive folder:[/] {GDRIVE_FOLDER_ID or 'My Drive (root)'}\n"
-        f"  [dim]File limit:[/]   {file_limit}",
-        border_style="cyan",
-        title="[bold]BOT STARTED[/]",
-    ))
+    console.print(
+        Panel.fit(
+            f"[bold cyan]Telegram → Google Drive Bot[/]\n\n"
+            f"  [dim]Started:[/]      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"  [dim]Allowed IDs:[/]  {', '.join(str(i) for i in ALLOWED_IDS)}\n"
+            f"  [dim]Auth token:[/]   {GDRIVE_TOKEN_FILE}\n"
+            f"  [dim]Drive folder:[/] {GDRIVE_FOLDER_ID or 'My Drive (root)'}\n"
+            f"  [dim]File limit:[/]   {file_limit}",
+            border_style="cyan",
+            title="[bold]BOT STARTED[/]",
+        )
+    )
 
     builder = Application.builder().token(TELEGRAM_TOKEN)
     if LOCAL_API_URL:
@@ -309,8 +351,15 @@ def main():
     app.add_handler(MessageHandler(file_filter, handle_file))
     app.add_handler(CallbackQueryHandler(handle_delete_callback, pattern="^delete:"))
 
-    logger.info("Polling for updates... (Ctrl+C to stop)")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Starting webhook on 0.0.0.0:8082 ...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=8082,
+        url_path="/webhook",
+        webhook_url="http://127.0.0.1:8082/webhook",  # local API calls this
+        secret_token=None,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 
 if __name__ == "__main__":
