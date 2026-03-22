@@ -11,8 +11,8 @@ from rich.logging import RichHandler
 from rich.table import Table
 from rich import box
 
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -41,6 +41,7 @@ ALLOWED_IDS = set(int(x.strip()) for x in os.getenv("ALLOWED_IDS", "").split(","
 GDRIVE_CLIENT_SECRET_FILE = os.getenv("GDRIVE_CLIENT_SECRET_FILE", "client_secret.json")
 GDRIVE_TOKEN_FILE = os.getenv("GDRIVE_TOKEN_FILE", "token.json")
 GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID") or None
+LOCAL_API_URL = os.getenv("LOCAL_API_URL") or None  # e.g. http://localhost:8081/bot
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
@@ -194,8 +195,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             link = upload_to_drive(local_path, file_name, mime_type, actual_size)
+            file_id = link.split("/d/")[1].split("/")[0]
             stats["uploaded"] += 1
-            await status_msg.edit_text(f"✅ Done!\n\n🔗 {link}")
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑 Delete from Drive", callback_data=f"delete:{file_id}")
+            ]])
+            await status_msg.edit_text(f"✅ Done!\n\n🔗 {link}", reply_markup=keyboard)
             logger.info(
                 "[bold green]✓ UPLOADED[/] %s → %s",
                 file_name, link,
@@ -206,6 +211,26 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stats["errors"] += 1
             logger.error("[red]✗ UPLOAD FAILED[/] %s: %s", file_name, e, extra={"markup": True})
             await status_msg.edit_text(f"❌ Upload failed: {e}")
+
+
+async def handle_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in ALLOWED_IDS:
+        await query.answer("Access denied.", show_alert=True)
+        return
+
+    _, file_id = query.data.split(":", 1)
+    try:
+        service = get_drive_service()
+        service.files().delete(fileId=file_id).execute()
+        await query.edit_message_text(query.message.text + "\n\n🗑 Deleted from Drive.")
+        logger.info("[yellow]DELETED[/] Drive file %s", file_id, extra={"markup": True})
+    except Exception as e:
+        logger.error("[red]DELETE FAILED[/] %s: %s", file_id, e, extra={"markup": True})
+        await query.answer(f"Delete failed: {e}", show_alert=True)
 
 
 def _print_stats():
@@ -224,17 +249,22 @@ def main():
     if not ALLOWED_IDS:
         raise ValueError("ALLOWED_IDS is not set in .env")
 
+    file_limit = "2 GB (local API)" if LOCAL_API_URL else "20 MB (official API)"
     console.print(Panel.fit(
         f"[bold cyan]Telegram → Google Drive Bot[/]\n\n"
         f"  [dim]Started:[/]      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"  [dim]Allowed IDs:[/]  {', '.join(str(i) for i in ALLOWED_IDS)}\n"
         f"  [dim]Auth token:[/]   {GDRIVE_TOKEN_FILE}\n"
-        f"  [dim]Drive folder:[/] {GDRIVE_FOLDER_ID or 'My Drive (root)'}",
+        f"  [dim]Drive folder:[/] {GDRIVE_FOLDER_ID or 'My Drive (root)'}\n"
+        f"  [dim]File limit:[/]   {file_limit}",
         border_style="cyan",
         title="[bold]BOT STARTED[/]",
     ))
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    builder = Application.builder().token(TELEGRAM_TOKEN)
+    if LOCAL_API_URL:
+        builder = builder.base_url(LOCAL_API_URL).local_mode(True)
+    app = builder.build()
 
     file_filter = (
         filters.Document.ALL
@@ -246,6 +276,7 @@ def main():
         | filters.Sticker.ALL
     )
     app.add_handler(MessageHandler(file_filter, handle_file))
+    app.add_handler(CallbackQueryHandler(handle_delete_callback, pattern="^delete:"))
 
     logger.info("Polling for updates... (Ctrl+C to stop)")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

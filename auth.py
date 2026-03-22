@@ -1,12 +1,17 @@
 """
-Run this once on the server to authenticate with your Google account.
-It will print a URL — open it in any browser, approve access, paste the code back.
-After this, token.json is saved and the bot uses it automatically forever
-(it auto-refreshes, so you rarely need to re-run this).
+Run this on your LOCAL machine (not the server) — it needs a browser.
+
+Steps:
+  1. Copy client_secret.json to your local machine
+  2. Install deps:  pip install google-auth-oauthlib
+  3. Run:           python auth.py
+  4. Browser opens → log in → allow access → token.json is created
+  5. Copy token.json back to the server:
+       scp token.json user@your-server:/path/to/bot/token.json
 """
 
 import os
-from google_auth_oauthlib.flow import Flow
+from google_auth_oauthlib.flow import InstalledAppFlow
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,29 +27,15 @@ if not os.path.exists(CLIENT_SECRET_FILE):
     print(f"  Save it as: {CLIENT_SECRET_FILE}\n")
     raise SystemExit(1)
 
-flow = Flow.from_client_secrets_file(
-    CLIENT_SECRET_FILE,
-    scopes=SCOPES,
-    redirect_uri="urn:ietf:wg:oauth:2.0:oob",
-)
+print("\nOpening browser for Google authentication...")
+print("If the browser does not open, copy the URL printed below manually.\n")
 
-auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
-
-print("\n" + "─" * 60)
-print("  Open this URL in your browser:")
-print("─" * 60)
-print(f"\n{auth_url}\n")
-print("─" * 60)
-print("  Log in with your Google account, allow access,")
-print("  then copy the code shown and paste it below.")
-print("─" * 60 + "\n")
-
-code = input("Paste authorization code here: ").strip()
-flow.fetch_token(code=code)
-creds = flow.credentials
+flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+creds = flow.run_local_server(port=0, open_browser=True)
 
 with open(TOKEN_FILE, "w") as f:
     f.write(creds.to_json())
 
-print(f"\n✓ Authentication successful! Token saved to {TOKEN_FILE}")
-print("You can now start the bot.\n")
+print(f"\n✓ token.json saved.")
+print(f"\nNow copy it to your server:")
+print(f"  scp {TOKEN_FILE} user@your-server:/path/to/bot/token.json\n")

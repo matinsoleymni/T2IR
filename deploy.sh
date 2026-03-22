@@ -53,6 +53,15 @@ for pkg in "${PACKAGES[@]}"; do
     fi
 done
 
+# ── Docker (for local Telegram Bot API server) ────────────────────────────────
+if ! command -v docker &>/dev/null; then
+    info "Installing Docker..."
+    curl -fsSL https://get.docker.com | sh -qq
+    success "Docker installed"
+else
+    info "Docker already installed"
+fi
+
 # ── 2. Python virtual environment ─────────────────────────────────────────────
 header "2 / 6  Python virtual environment"
 
@@ -95,16 +104,71 @@ else
 
     read -rp "  Google Drive Folder ID (optional, leave blank for root): " FOLDER_ID
 
+    read -rp "  Telegram API ID (from my.telegram.org, for >20MB files): " TG_API_ID
+    read -rp "  Telegram API Hash (from my.telegram.org, for >20MB files): " TG_API_HASH
+
     cat > "$ENV_FILE" <<EOF
 TELEGRAM_TOKEN=${TG_TOKEN}
 ALLOWED_IDS=${ALLOWED_IDS}
 GDRIVE_CLIENT_SECRET_FILE=${BOT_DIR}/client_secret.json
 GDRIVE_TOKEN_FILE=${BOT_DIR}/token.json
 GDRIVE_FOLDER_ID=${FOLDER_ID}
+TELEGRAM_API_ID=${TG_API_ID}
+TELEGRAM_API_HASH=${TG_API_HASH}
+LOCAL_API_URL=http://localhost:8081/bot
 EOF
 
     chmod 600 "$ENV_FILE"
     success ".env created at $ENV_FILE"
+fi
+
+# ── 3b. Local Telegram Bot API server ─────────────────────────────────────────
+header "3b / 6  Local Telegram Bot API server (removes 20MB limit)"
+
+source "$ENV_FILE" 2>/dev/null || true
+TG_API_ID="${TELEGRAM_API_ID:-}"
+TG_API_HASH="${TELEGRAM_API_HASH:-}"
+
+if [[ -z "$TG_API_ID" || -z "$TG_API_HASH" ]]; then
+    warn "TELEGRAM_API_ID or TELEGRAM_API_HASH not set — skipping local API server"
+    warn "File size limit will be 20MB. Add them to .env and re-run to enable 2GB support."
+else
+    LOCAL_DATA="$BOT_DIR/telegram-bot-api-data"
+    mkdir -p "$LOCAL_DATA"
+
+    if docker ps --format '{{.Names}}' | grep -q "^telegram-bot-api$"; then
+        info "Local API server already running"
+    else
+        if docker ps -a --format '{{.Names}}' | grep -q "^telegram-bot-api$"; then
+            docker rm -f telegram-bot-api &>/dev/null
+        fi
+
+        info "Starting local Telegram Bot API server..."
+        docker run -d \
+            --name telegram-bot-api \
+            --restart unless-stopped \
+            -p 8081:8081 \
+            -v "$LOCAL_DATA:/var/lib/telegram-bot-api" \
+            aiogram/telegram-bot-api:latest \
+            --api-id="$TG_API_ID" \
+            --api-hash="$TG_API_HASH" \
+            --local \
+            --dir=/var/lib/telegram-bot-api
+
+        info "Waiting for local API server to start..."
+        for i in {1..15}; do
+            if curl -sf "http://localhost:8081/bot${TELEGRAM_TOKEN}/getMe" &>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+
+        if curl -sf "http://localhost:8081/bot${TELEGRAM_TOKEN}/getMe" &>/dev/null; then
+            success "Local API server is up — file limit: 2 GB"
+        else
+            warn "Local API server may not be ready yet — check: docker logs telegram-bot-api"
+        fi
+    fi
 fi
 
 # ── 4. Google OAuth2 credentials ──────────────────────────────────────────────
