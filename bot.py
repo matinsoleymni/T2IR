@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import os
+import shutil
 import tempfile
 import time
 from datetime import datetime
@@ -138,6 +140,103 @@ async def upload_to_drive(
     return f"https://drive.google.com/file/d/{file_id}/view"
 
 
+async def _process_file(
+    update: Update,
+    status_msg,
+    tg_file,
+    file_name: str,
+    mime_type: str,
+    file_size: int,
+):
+    """Run download + Drive upload in a background task so the webhook returns immediately."""
+    username = update.effective_user.username or update.effective_user.first_name
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = str(Path(tmpdir) / file_name)
+
+        # ── Download ────────────────────────────────────────────────────────
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold yellow]Downloading from Telegram[/]"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("download", total=file_size if file_size else None)
+            last_edit = 0.0
+
+            file_path = tg_file.file_path
+
+            if LOCAL_API_URL and not file_path.startswith("http"):
+                # Local API mode: file_path is an absolute path on this machine
+                await asyncio.to_thread(shutil.copy2, file_path, local_path)
+                progress.update(task, completed=file_size)
+            else:
+                downloaded = 0
+                async with httpx.AsyncClient() as client:
+                    async with client.stream("GET", file_path) as resp:
+                        resp.raise_for_status()
+                        with open(local_path, "wb") as f:
+                            async for chunk in resp.aiter_bytes(65536):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                progress.update(task, completed=downloaded)
+                                now = time.monotonic()
+                                if now - last_edit >= 2 and file_size:
+                                    pct = int(downloaded / file_size * 100)
+                                    done_mb = downloaded / 1024 / 1024
+                                    total_mb = file_size / 1024 / 1024
+                                    await status_msg.edit_text(
+                                        f"⬇️ Downloading... {pct}% ({done_mb:.1f} / {total_mb:.1f} MB)"
+                                    )
+                                    last_edit = now
+
+        actual_size = Path(local_path).stat().st_size
+        logger.info("  Downloaded: %s (%.1f KB)", file_name, actual_size / 1024)
+
+        await status_msg.edit_text("☁️ Uploading to Drive... 0%")
+
+        async def upload_progress(text: str):
+            await status_msg.edit_text(text)
+
+        try:
+            link = await upload_to_drive(
+                local_path,
+                file_name,
+                mime_type,
+                actual_size,
+                progress_cb=upload_progress,
+            )
+            file_id = link.split("/d/")[1].split("/")[0]
+            stats["uploaded"] += 1
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🗑 Delete from Drive", callback_data=f"delete:{file_id}"
+                        )
+                    ]
+                ]
+            )
+            await status_msg.edit_text(f"✅ Done!\n\n🔗 {link}", reply_markup=keyboard)
+            logger.info(
+                "[bold green]✓ UPLOADED[/] %s → %s",
+                file_name,
+                link,
+                extra={"markup": True},
+            )
+            _print_stats()
+        except Exception as e:
+            stats["errors"] += 1
+            logger.error(
+                "[red]✗ UPLOAD FAILED[/] %s: %s", file_name, e, extra={"markup": True}
+            )
+            await status_msg.edit_text(f"❌ Upload failed: {e}")
+
+
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
@@ -196,6 +295,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Unsupported file type.")
         return
 
+    # Standard Telegram API caps file downloads at 20 MB
+    MAX_STANDARD_API_SIZE = 20 * 1024 * 1024
+    if not LOCAL_API_URL and file_size > MAX_STANDARD_API_SIZE:
+        await update.message.reply_text(
+            f"❌ File is {file_size / 1024 / 1024:.1f} MB — the standard Telegram API only supports "
+            f"downloading files up to 20 MB. Configure LOCAL_API_URL to handle larger files."
+        )
+        return
+
     size_kb = file_size / 1024
     logger.info(
         "[green]FILE[/] from [bold]%s[/] — %s (%.1f KB)",
@@ -207,81 +315,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await update.message.reply_text("⬇️ Downloading... 0%")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        local_path = str(Path(tmpdir) / file_name)
-
-        # Download with progress bar in console and Telegram message
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[bold yellow]Downloading from Telegram[/]"),
-            BarColumn(),
-            DownloadColumn(),
-            TransferSpeedColumn(),
-            TimeRemainingColumn(),
-            console=console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("download", total=file_size if file_size else None)
-            downloaded = 0
-            last_edit = 0.0
-            async with httpx.AsyncClient() as client:
-                async with client.stream("GET", tg_file.file_path) as resp:
-                    with open(local_path, "wb") as f:
-                        async for chunk in resp.aiter_bytes(65536):
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            progress.update(task, completed=downloaded)
-                            now = time.monotonic()
-                            if now - last_edit >= 2 and file_size:
-                                pct = int(downloaded / file_size * 100)
-                                done_mb = downloaded / 1024 / 1024
-                                total_mb = file_size / 1024 / 1024
-                                await status_msg.edit_text(
-                                    f"⬇️ Downloading... {pct}% ({done_mb:.1f} / {total_mb:.1f} MB)"
-                                )
-                                last_edit = now
-
-        actual_size = Path(local_path).stat().st_size
-        logger.info("  Downloaded: %s (%.1f KB)", file_name, actual_size / 1024)
-
-        await status_msg.edit_text("☁️ Uploading to Drive... 0%")
-
-        async def upload_progress(text: str):
-            await status_msg.edit_text(text)
-
-        try:
-            link = await upload_to_drive(
-                local_path,
-                file_name,
-                mime_type,
-                actual_size,
-                progress_cb=upload_progress,
-            )
-            file_id = link.split("/d/")[1].split("/")[0]
-            stats["uploaded"] += 1
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "🗑 Delete from Drive", callback_data=f"delete:{file_id}"
-                        )
-                    ]
-                ]
-            )
-            await status_msg.edit_text(f"✅ Done!\n\n🔗 {link}", reply_markup=keyboard)
-            logger.info(
-                "[bold green]✓ UPLOADED[/] %s → %s",
-                file_name,
-                link,
-                extra={"markup": True},
-            )
-            _print_stats()
-        except Exception as e:
-            stats["errors"] += 1
-            logger.error(
-                "[red]✗ UPLOAD FAILED[/] %s: %s", file_name, e, extra={"markup": True}
-            )
-            await status_msg.edit_text(f"❌ Upload failed: {e}")
+    # Run the heavy work in a background task so the webhook handler returns
+    # immediately — prevents Telegram from retrying the update on timeout.
+    asyncio.ensure_future(
+        _process_file(update, status_msg, tg_file, file_name, mime_type, file_size)
+    )
 
 
 async def handle_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
